@@ -769,12 +769,28 @@ async function scanCar() {
   document.getElementById('resultContainer').innerHTML = '';
   document.getElementById('errorBox').style.display = 'none';
 
-  const prompt = `Je bent een auto-expert. Analyseer deze autoafbeelding en retourneer ALLEEN een geldig JSON-object zonder uitleg of markdown backticks.
+  const prompt = `You are an expert automotive identifier. Carefully analyze this image and identify the car.
 
-{"brand":"merknaam","model":"modelnaam","year":"bouwjaar of reeks","motor":"motoromschrijving bijv 2.0 TSI","pk":getal,"koppel":getal,"nulhonderd":decimaal getal,"gewicht":getal,"rarity":"common|uncommon|rare|epic|legendary"}
+IMPORTANT: You MUST always return a result. Even if the image is unclear, make your best guess based on visible details like body shape, lights, grille, badges, proportions, color, and style.
 
-Rarity-logica: legendary=supersportwagen Bugatti Koenigsegg meer dan 1000pk, epic=Ferrari Lamborghini meer dan 600pk, rare=BMW M AMG meer dan 400pk, uncommon=GTI TypeR RS meer dan 200pk, common=gewone auto.
-Geef altijd realistische modelspecifieke specs. Retourneer ALLEEN de JSON zonder enige andere tekst.`;
+Return ONLY a valid JSON object, no explanation, no markdown, no backticks. Just raw JSON.
+
+Format:
+{"brand":"make name","model":"model name e.g. Golf GTI, 911 Carrera, Model 3","year":"year or range e.g. 2019 or 2015-2022","motor":"engine description e.g. 2.0 TSI, V8 5.0L, Electric","pk":number,"koppel":number,"nulhonderd":number with one decimal,"gewicht":number,"rarity":"common|uncommon|rare|epic|legendary"}
+
+Rarity rules:
+- legendary: exotic supercars, Bugatti, Koenigsegg, Pagani, McLaren P1, LaFerrari, >1000hp
+- epic: Ferrari, Lamborghini, Porsche GT2/GT3, >600hp
+- rare: BMW M, Mercedes AMG, Audi RS, Porsche Carrera, >400hp
+- uncommon: Golf GTI, Honda Type R, Audi S-line, sporty versions, >200hp
+- common: regular everyday cars
+
+Use realistic specs for the identified model. If unsure of exact variant, use the base model specs.
+Always return valid JSON. Never return an error or refusal.`;
+
+  // Detect image type from base64 header
+  const mimeMatch = currentImg.match(/data:(image\/[a-z]+);base64,/);
+  const mimeType = (mimeMatch && mimeMatch[1]) || 'image/jpeg';
 
   try {
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
@@ -782,29 +798,53 @@ Geef altijd realistische modelspecifieke specs. Retourneer ALLEEN de JSON zonder
       headers: {
         'Content-Type': 'application/json',
         'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01'
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true'
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 500,
+        model: 'claude-opus-4-5',
+        max_tokens: 600,
         messages: [{ role: 'user', content: [
-          { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: imageBase64 }},
+          { type: 'image', source: { type: 'base64', media_type: mimeType, data: imageBase64 }},
           { type: 'text', text: prompt }
         ]}]
       })
     });
+
     const data = await resp.json();
-    if (data.error) throw new Error(data.error.message);
+
+    if (data.error) {
+      const msg = data.error.message || '';
+      if (data.error.type === 'authentication_error' || msg.includes('401') || msg.includes('auth') || msg.includes('API key')) {
+        throw new Error('AUTH');
+      }
+      throw new Error('API: ' + msg);
+    }
+
     const text = data.content.map(b => b.text || '').join('');
-    const car = JSON.parse(text.replace(/```json|```/g, '').trim());
+    // Extract JSON even if there's surrounding text
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error('PARSE');
+    const car = JSON.parse(jsonMatch[0]);
+
+    // Validate required fields
+    if (!car.brand || !car.model) throw new Error('INCOMPLETE');
+
     document.getElementById('scanningUI').style.display = 'none';
     renderResult(car, currentImg);
+
   } catch(err) {
     document.getElementById('scanningUI').style.display = 'none';
     const eb = document.getElementById('errorBox');
-    eb.textContent = err.message.includes('401') || err.message.includes('auth')
-      ? 'Ongeldige API-sleutel. Controleer je sleutel in het Profiel-tabblad.'
-      : 'Auto kon niet worden herkend. Probeer een duidelijkere foto van de auto.';
+    if (err.message === 'AUTH') {
+      eb.innerHTML = '🔑 Ongeldige API-sleutel. Ga naar het <b>Profiel-tabblad</b> en controleer je sleutel op <b>console.anthropic.com</b>';
+    } else if (err.message === 'PARSE' || err.message === 'INCOMPLETE') {
+      eb.textContent = 'Onverwacht antwoord ontvangen. Probeer opnieuw.';
+    } else if (err.message.includes('Failed to fetch') || err.message.includes('NetworkError')) {
+      eb.textContent = 'Geen verbinding. Controleer je internet en probeer opnieuw.';
+    } else {
+      eb.innerHTML = 'Fout: ' + err.message;
+    }
     eb.style.display = 'block';
   } finally {
     document.getElementById('scanBtn').disabled = false;
